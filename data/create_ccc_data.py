@@ -61,11 +61,12 @@ def pool_process(inputs):
     while game:
         try:
             id = sha256(str(game.mainline()).encode('utf-8')).hexdigest()
+            result = game.headers.get("Result")
             
             game_data = process_game(game)
             
             with jsonlines.open(os.path.join(outdir, f"{os.path.splitext(fname)[0]}.jsonl"), 'a') as writer:
-                writer.write(dict(id=id, game=game_data))
+                writer.write(dict(id=id, game=game_data, result=result))
         except Exception as e:
             print(f"ERROR in {fname}")
             print(e)
