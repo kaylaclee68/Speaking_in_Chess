@@ -168,7 +168,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, mask_prompt_loss=False, prompt_len=0):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -183,9 +183,35 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
+            # if we are given some desired targets also calculate the loss\
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if not mask_prompt_loss:
+                # X = [input_game || engine_prediction]; Y = X shift by 1
+                #loss (X[engine_prediciton], Y[engine_prediction])
+                #gradient of X[i] -> run gradients on all X j < i
+
+                #seq_in: pgn[0:i] <- game until now
+                #seq_out: pgn[i:] <- engine prediction of game
+
+                # prompt
+                # conversation
+
+                # X = prompt + [SEP] + conversation
+                # Y = X[1:]
+                # compute loss on loss(X[conversation], Y[conversation])
+
+                # prompt <- treat prompt as static input
+                # conversation <- only run loss on this
+
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=23253)
+            else:
+                # print(prompt_len)
+                # print(logits[:, prompt_len:].shape)
+                # print(logits.shape)
+                # print(targets.shape)
+
+                loss = F.cross_entropy(logits[:, prompt_len:].contiguous().view(-1, logits.size(-1)), targets.view(-1), ignore_index=23253)
+
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
@@ -342,7 +368,7 @@ class GPT(nn.Module):
         return ~mask, count
     
     @torch.no_grad()
-    def generate_legal(self, idx, max_new_tokens, board, tokenizer, temperature=1.0, top_k=None):
+    def generate_legal(self, idx, max_new_tokens, board: chess.Board, tokenizer, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -366,7 +392,7 @@ class GPT(nn.Module):
                 is_illegal, count = self.get_is_illegal(board, tokenizer)
                 is_illegal = is_illegal.unsqueeze(0).to(idx.device)
                 logits[is_illegal] = -float('Inf')
-                if count == 0:
+                if count == 0 or board.can_claim_draw():
                     break
             if top_k is not None:
                 top_d = min(top_k, logits.size(-1)) if count is None else min(top_k, count)
@@ -386,4 +412,60 @@ class GPT(nn.Module):
                 skip = False
 
             idx = torch.cat((idx, idx_next), dim=1)
+        return moves
+    
+    @torch.no_grad()
+    def generate_beam(self, idx: torch.Tensor, max_new_tokens, tokenizer, temperature=1.0, top_k=None, max_size=128):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        w_id = tokenizer.encode("<w>").ids[0]
+        b_id = tokenizer.encode("<b>").ids[0]
+        eos = tokenizer.encode("<eos>").ids[0]
+        boards = []
+        moves = []
+        for i, _ in enumerate(range(max_new_tokens)):
+
+            masks = torch.vstack(self.get_is_illegal(boards[g_idx]) for g_idx in range(idx.shape))
+
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+
+            logits, _ = self(idx_cond)
+
+            logits = logits[:, -1, :] / temperature
+
+            logits[masks] = -float('Inf')
+
+            top_k_idx_values, top_k_idx = torch.topk(logits, top_k)
+
+            top_k_idx = top_k_idx[top_k_idx_values > -float('Inf')]
+
+            idx_next = top_k_idx.flatten()
+
+            idx = idx.repeat_interleave(len(top_k_idx), dim=0)
+
+            turn = torch.vstack([i % 2] * idx.shape[0])
+
+            idx = torch.cat([idx, idx_next, turn], axis=1)
+
+            idx = idx[:max_size, :]
+
+            new_boards = []
+
+            for board in boards:
+                for move_idx in top_k_idx:
+                        new_board = board.copy()
+
+                        move = tokenizer.decode([idx_next.item()])
+
+                        new_board.push_san(move)
+                        new_boards.append(new_board)
+
+
+
+
+
+           
         return moves
