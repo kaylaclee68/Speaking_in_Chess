@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import chess
+from tokenizers import Tokenizer
+import time
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -218,6 +220,99 @@ class GPT(nn.Module):
             loss = None
 
         return logits, loss
+    
+    def sample_trajectories(self, batch_size: int, tokenizer: Tokenizer, start_state: str = None, device='cuda') -> list[torch.Tensor]:
+        if start_state is None:
+            start_state = torch.IntTensor([0]*batch_size).to(device).unsqueeze(1)
+
+            assert start_state.shape == (batch_size, 1)
+
+        idx = start_state
+
+        boards = [chess.Board() for _ in range(batch_size)]
+
+        dones = [False] * batch_size
+
+        turns = [1, 0]
+
+        count = 1
+
+        move_count = 0
+
+        block_size = self.config.block_size 
+
+        start_total_time = time.time()
+
+        model_time = 0
+        board_time = 0
+
+        sample_probs = []
+
+        while count < (block_size - idx.shape[0]) and not all(dones):
+
+            start = time.time()
+            logits, _ = self(idx)
+
+            probs = nn.functional.softmax(logits, dim=-1)
+
+            action_distribution = torch.distributions.categorical.Categorical(probs=probs)
+
+            idx_next = action_distribution.sample()
+            model_time += time.time() - start
+
+
+            #log_probs = action_distribution.log_prob(idx_next)
+            # print(probs.shape)
+            # print(idx_next.shape)
+            sample_prob_next = torch.gather(probs, -1, idx_next.unsqueeze(-1)).squeeze(-1).contiguous()
+            #print(sample_prob_next.shape)
+
+            start = time.time()
+            for i, board in enumerate(boards):
+                if not dones[i]:
+                    san = tokenizer.id_to_token(idx_next[i].item())
+                    try:
+                        move = board.parse_san(san)
+                        board.push(move)
+                    except (chess.IllegalMoveError, chess.InvalidMoveError):
+                        dones[i] = True
+
+                    if board.is_game_over(claim_draw=True):
+                        dones[i] = True
+
+
+                # else:
+                #     # if it is done, stick a pad token instead
+                #     idx_next[i] = 23253
+
+            board_time += time.time() - start
+            # check if this cuts gradients in a bad way
+            turn_next = torch.IntTensor([turns[move_count % 2]]*batch_size).to(device).unsqueeze(1)
+            
+            # print(idx.shape)
+            # print(idx_next.shape)
+            # print(turn_next.shape)
+
+            idx = torch.cat((idx, idx_next, turn_next), dim=-1)
+            sample_probs.append(sample_prob_next)
+            count += 2
+            move_count += 1
+
+        # print("model time: ", model_time)
+        # print("board_time: ", board_time)
+        # total_time = time.time() - start_total_time
+        # print("total_time: ", total_time)
+
+        # print("sec per traj: ", total_time/batch_size)
+        # print("traj per sec: ", batch_size/total_time)
+
+        # print(move_count)
+
+        return torch.hstack(sample_probs).to(device), boards
+
+
+
+
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
