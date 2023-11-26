@@ -221,6 +221,46 @@ class GPT(nn.Module):
 
         return logits, loss
     
+    def get_next_move(self, idx: torch.Tensor, board, tokenizer: Tokenizer, temperature: float = 0.1) -> str:
+        
+        device = idx.device
+        
+        idx = idx.unsqueeze(0)
+        
+        logits, _ = self(idx)
+        
+        legality_mask_list = []
+
+        is_illegal, _ = self.get_is_illegal(board, tokenizer)
+        legality_mask_list.append(is_illegal)
+            
+        legality_mask = torch.vstack(legality_mask_list).to(device)
+        
+        logits_legal = logits.clone() / temperature
+        logits_legal[legality_mask.unsqueeze(1)] = -float('Inf')
+
+        action_distribution = torch.distributions.categorical.Categorical(logits=logits_legal)
+
+        idx_next = action_distribution.sample()
+        
+        # print(idx_next)
+        
+        # print(idx.shape)
+        # print(idx_next.shape)
+        # print(logits.shape)
+        # print(legality_mask.shape)
+        
+        
+        
+        
+        prob = action_distribution.log_prob(idx_next)
+        logit = logits[:, :, idx_next]
+        
+        
+        return idx_next, logit, prob
+        
+        
+        
     def sample_trajectories(self, batch_size: int, tokenizer: Tokenizer, start_state: str = None, device='cuda') -> list[torch.Tensor]:
         if start_state is None:
             start_state = torch.IntTensor([0]*batch_size).to(device).unsqueeze(1)
@@ -253,9 +293,9 @@ class GPT(nn.Module):
             start = time.time()
             logits, _ = self(idx)
 
-            probs = nn.functional.softmax(logits, dim=-1)
+            #probs = nn.functional.softmax(logits, dim=-1)
 
-            action_distribution = torch.distributions.categorical.Categorical(probs=probs)
+            action_distribution = torch.distributions.categorical.Categorical(logits=logits)
 
             idx_next = action_distribution.sample()
             model_time += time.time() - start
@@ -264,7 +304,7 @@ class GPT(nn.Module):
             #log_probs = action_distribution.log_prob(idx_next)
             # print(probs.shape)
             # print(idx_next.shape)
-            sample_prob_next = torch.gather(probs, -1, idx_next.unsqueeze(-1)).squeeze(-1).contiguous()
+            sample_prob_next = action_distribution.log_prob(idx_next) #torch.gather(probs, -1, idx_next.unsqueeze(-1)).squeeze(-1).contiguous()
             #print(sample_prob_next.shape)
 
             start = time.time()
@@ -310,6 +350,92 @@ class GPT(nn.Module):
 
         return torch.hstack(sample_probs).to(device), boards
 
+    def sample_legal_trajectories(self, batch_size: int, tokenizer: Tokenizer, start_state: str = None, device='cuda') -> list[torch.Tensor]:
+        if start_state is None:
+            start_state = torch.IntTensor([0]*batch_size).to(device).unsqueeze(1)
+
+            assert start_state.shape == (batch_size, 1)
+
+        idx = start_state
+
+        boards = [chess.Board() for _ in range(batch_size)]
+
+        dones = [False] * batch_size
+
+        turns = [1, 0]
+
+        count = 1
+
+        move_count = 0
+
+        block_size = self.config.block_size 
+
+        start_total_time = time.time()
+
+        model_time = 0
+        board_time = 0
+
+        sample_probs = []
+
+        while count < (block_size - idx.shape[0]) and not all(dones):
+            
+            legality_mask_list = []
+            for i, board in enumerate(boards):
+                if not dones[i]:
+                    is_illegal, _ = self.get_is_illegal(board, tokenizer)
+                    legality_mask_list.append(is_illegal)
+                else:
+                    legality_mask_list.append(torch.zeros(self.config.vocab_size).type(torch.bool))
+            
+            legality_mask = torch.vstack(legality_mask_list).to(device)
+
+            start = time.time()
+            logits, _ = self(idx)
+            
+            #logits_legal = logits + legality_mask * -float('inf')
+            # print(logits.squeeze(1).shape)
+            # print(legality_mask.shape)
+            logits_legal = logits.clone()
+            logits_legal[legality_mask.unsqueeze(1)] = -float('Inf')
+            
+            # print(logits_legal)
+            # print(logits_legal.max())
+            # print(logits_legal.shape)
+
+            action_distribution = torch.distributions.categorical.Categorical(logits=logits_legal)
+
+            idx_next = action_distribution.sample()
+            model_time += time.time() - start
+
+            sample_prob_next = action_distribution.log_prob(idx_next) #torch.gather(probs, -1, idx_next.unsqueeze(-1)).squeeze(-1).contiguous()
+
+            start = time.time()
+            for i, board in enumerate(boards):
+                if not dones[i]:
+                    san = tokenizer.id_to_token(idx_next[i].item())
+                    try:
+                        move = board.parse_san(san)
+                        board.push(move)
+                    except (chess.IllegalMoveError, chess.InvalidMoveError):
+                        dones[i] = True
+
+                    if board.is_game_over(claim_draw=True):
+                        dones[i] = True
+
+
+            board_time += time.time() - start
+            # check if this cuts gradients in a bad way
+            turn_next = torch.IntTensor([turns[move_count % 2]]*batch_size).to(device).unsqueeze(1)
+
+            # print(idx.shape)
+            # print(idx_next.shape)
+            # print(turn_next.shape)
+            idx = torch.cat((idx, idx_next, turn_next), dim=-1)
+            sample_probs.append(sample_prob_next)
+            count += 2
+            move_count += 1
+
+        return torch.hstack(sample_probs).to(device), boards, dones
 
 
 
@@ -487,7 +613,7 @@ class GPT(nn.Module):
                 is_illegal, count = self.get_is_illegal(board, tokenizer)
                 is_illegal = is_illegal.unsqueeze(0).to(idx.device)
                 logits[is_illegal] = -float('Inf')
-                if count == 0 or board.can_claim_draw():
+                if count == 0:
                     break
             if top_k is not None:
                 top_d = min(top_k, logits.size(-1)) if count is None else min(top_k, count)
@@ -509,58 +635,99 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
         return moves
     
-    @torch.no_grad()
-    def generate_beam(self, idx: torch.Tensor, max_new_tokens, tokenizer, temperature=1.0, top_k=None, max_size=128):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-        w_id = tokenizer.encode("<w>").ids[0]
-        b_id = tokenizer.encode("<b>").ids[0]
-        eos = tokenizer.encode("<eos>").ids[0]
-        boards = []
-        moves = []
-        for i, _ in enumerate(range(max_new_tokens)):
+    # @torch.no_grad()
+    # def generate_beam(self, idx: torch.Tensor, max_new_tokens, tokenizer, temperature=1.0, top_k=None, max_size=128):
+    #     """
+    #     Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    #     the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    #     Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+    #     """
+    #     w_id = tokenizer.encode("<w>").ids[0]
+    #     b_id = tokenizer.encode("<b>").ids[0]
+    #     eos = tokenizer.encode("<eos>").ids[0]
+    #     boards = []
+    #     moves = []
+    #     for i, _ in enumerate(range(max_new_tokens)):
 
-            masks = torch.vstack(self.get_is_illegal(boards[g_idx]) for g_idx in range(idx.shape))
+    #         masks = torch.vstack(self.get_is_illegal(boards[g_idx]) for g_idx in range(idx.shape))
 
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+    #         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
 
-            logits, _ = self(idx_cond)
+    #         logits, _ = self(idx_cond)
 
-            logits = logits[:, -1, :] / temperature
+    #         logits = logits[:, -1, :] / temperature
 
-            logits[masks] = -float('Inf')
+    #         logits[masks] = -float('Inf')
 
-            top_k_idx_values, top_k_idx = torch.topk(logits, top_k)
+    #         top_k_idx_values, top_k_idx = torch.topk(logits, top_k)
 
-            top_k_idx = top_k_idx[top_k_idx_values > -float('Inf')]
+    #         top_k_idx = top_k_idx[top_k_idx_values > -float('Inf')]
 
-            idx_next = top_k_idx.flatten()
+    #         idx_next = top_k_idx.flatten()
 
-            idx = idx.repeat_interleave(len(top_k_idx), dim=0)
+    #         idx = idx.repeat_interleave(len(top_k_idx), dim=0)
 
-            turn = torch.vstack([i % 2] * idx.shape[0])
+    #         turn = torch.vstack([i % 2] * idx.shape[0])
 
-            idx = torch.cat([idx, idx_next, turn], axis=1)
+    #         idx = torch.cat([idx, idx_next, turn], axis=1)
 
-            idx = idx[:max_size, :]
+    #         idx = idx[:max_size, :]
 
-            new_boards = []
+    #         new_boards = []
 
-            for board in boards:
-                for move_idx in top_k_idx:
-                        new_board = board.copy()
+    #         for board in boards:
+    #             for move_idx in top_k_idx:
+    #                     new_board = board.copy()
 
-                        move = tokenizer.decode([idx_next.item()])
+    #                     move = tokenizer.decode([idx_next.item()])
 
-                        new_board.push_san(move)
-                        new_boards.append(new_board)
+    #                     new_board.push_san(move)
+    #                     new_boards.append(new_board)
 
 
 
 
 
            
-        return moves
+    #     return moves
+    @torch.no_grad()
+    def generate_beam(self, idx: torch.Tensor, max_new_tokens, tokenizer, board:chess.Board,  temperature=1.0, top_k=None, max_size=128, beam_width=5):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        
+        w_id = tokenizer.encode("<w>").ids[0]
+        b_id = tokenizer.encode("<b>").ids[0]
+        eos = tokenizer.encode("<eos>").ids[0]
+        beams = [(idx, board.copy(), 0)]
+
+        for _ in range(max_new_tokens):
+            new_beams = []
+            for beam_idx, beam_board, beam_score in beams: 
+                logits, _ = self(beam_idx[:, -self.config.block_size:]) 
+                logits = logits[:, -1, :] / temperature  
+                if top_k is not None: 
+                    top_values, top_indices = torch.topk(logits, top_k) 
+                else: 
+                    top_values, top_indices = torch.sort(logits, descending=True)
+                for value, index in zip(top_values[0], top_indices[0]): 
+                    if index.item() in {w_id, b_id, eos}:
+                        continue 
+                    move = tokenizer.decode([index.item()]) 
+                    try:
+                        next_board = beam_board.copy()
+                        next_board.push_san(move)
+                        new_idx = torch.cat((beam_idx, index.view(1, 1)), dim=1)
+                        new_score = beam_score + value.item()
+                        new_beams.append((new_idx, next_board, new_score))
+                    except ValueError:
+                        continue 
+
+            beams = sorted(new_beams, key=lambda x: x[2], reverse=True)[:beam_width]
+            print(beams)
+            if all(board.is_game_over() for _, board, _ in beams):
+                break
+        best_sequence, best_board, _ = max(beams, key=lambda x: x[2])
+        return best_sequence, best_board

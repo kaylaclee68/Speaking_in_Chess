@@ -16,27 +16,30 @@ from model import GPTConfig, GPT
 from sampler import BatchShuffleSampler
 from ccc_dataset import ParquetDataset
 from rl_utils import get_rewards, pad_arrays
+import chess
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 epochs = 10
-out_dir = 'out_chess_llm_q_iteration_2'
-eval_interval = 100
+out_dir = 'out_chess_llm_q_iteration_legal_target_fixed'
+eval_interval = 3
+
+save_interval = 50
 log_interval = 1
 eval_iters = 50
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
-checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_q_iteration/ckpt900.pt'
+checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_finetune_2/ckpt18000.pt'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'lichess'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset_path =  "/data/evan/CS285_Final_Project/data/ccc_processed.parquet" #change to lichess
-gradient_accumulation_steps = 10 # used to simulate larger batch sizes
-batch_size = 3 # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 64 # used to simulate larger batch sizes
+batch_size = 1 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 768
 # model
 n_layer = 12
@@ -53,21 +56,26 @@ beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
+warmup_iters = 0 # how many steps to warm up for
 lr_decay_iters = 70000 # should be ~= max_iters per Chinchilla
-min_lr = 2e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+min_lr = 2e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16'# if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = False # use PyTorch 2.0 to compile the model to be faster
+
+update_period = 15
+
+temperature = 0.1
+target_temperature = 0.00001
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
-
+max_ply = 200
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -139,21 +147,28 @@ elif init_from == 'resume':
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
+    iter_num = 0#checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+
+prev_model = GPT(gptconf)
+prev_model.load_state_dict(model.state_dict())
+prev_model.requires_grad_(False)
+prev_model.eval()
+
 
 
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
+prev_model.to(device)
 
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
+# if init_from == 'resume':
+#     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
 if compile:
@@ -184,31 +199,11 @@ if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            with ctx:
-                probs, boards = model.sample_trajectories(batch_size, tokenizer, device=device)
-            targets, masks = get_rewards(boards)
-
-            full_masks = torch.Tensor(pad_arrays(masks)).to(device)
-
-            full_targets = torch.Tensor(pad_arrays(targets)).to(device)
-
-            inputs = full_masks * probs
-
-            losses[k] = torch.nn.functional.binary_cross_entropy_with_logits(inputs, full_targets, reduction='sum') / full_masks.sum()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-
-loss_fn = torch.nn.BCEWithLogitsLoss(reduction='sum')
-
+losses_for_logging = []
+num_wins = 0
+num_draws = 0
+num_lose = 0
+games_played = 0
 for i in range(max_iters):
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -216,64 +211,148 @@ for i in range(max_iters):
 
 
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}")
+    if (iter_num + 1)% eval_interval == 0 and master_process:
+        winrate = num_wins / games_played if games_played > 0 else 0
+        drawrate = num_draws / games_played if games_played > 0 else 0
+        lossrate = num_lose / games_played if games_played > 0 else 0
+        
+        mean_loss = np.mean(losses_for_logging)
+        
+        print(f"step {iter_num}: winrate {winrate} : drawrate {drawrate} : lossrate {lossrate}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
-                "train/loss": losses['train'],
+                "mean_trajectory_prob": mean_loss,
+                "winrate": winrate,
+                "drawrate": drawrate,
+                "lossrate": lossrate,
                 "lr": lr,
             })
-        if True:
-            if iter_num > 0:
-                checkpoint = {
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': 999,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, f'ckpt{iter_num}.pt'))
+        num_wins = 0
+        num_draws = 0
+        num_lose = 0
+        games_played = 0
+        losses_for_logging = []
+        
+    if iter_num % save_interval == 0 and master_process:
+        if iter_num > 0:
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': model_args,
+                'iter_num': iter_num,
+                'best_val_loss': 999,
+                'config': config,
+            }
+            print(f"saving checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, f'ckpt{iter_num}.pt'))
     if iter_num == 0 and eval_only:
         break
 
-    
+    losses_list = []
     optimizer.zero_grad()
     for micro_step in range(gradient_accumulation_steps):
         # sample entire trajectory batch
+        board = chess.Board()
+        
+        ply = 0
+        player_picker = (iter_num + micro_step) % 2 == 0
+        players = {0: model if player_picker else prev_model, 1: prev_model if player_picker else model}
+        
+        idx_list = torch.IntTensor([]).to(device)
+        
+        q_values_list = []
+        probs_list = []
+        while not (board.is_game_over() or ply > max_ply):
+            
+            turn_id = ply % 2
+            
+            is_model = turn_id == int(not player_picker)
 
-        with ctx:
-            probs, boards = model.sample_trajectories(batch_size, tokenizer, device=device)
+            idx_list = torch.cat((idx_list, torch.IntTensor([turn_id]).to(device)))
+            
+            temp = temperature if is_model else target_temperature
+            
+            with ctx:    
+                idx_next, logit, prob = players[turn_id].get_next_move(idx_list, board, tokenizer, temperature=temp)
+                
+            
+            move = tokenizer.id_to_token(idx_next)
+            
+            board.push_san(move)
+            
+            # print(idx_list.shape)
+            # print(idx_next.shape)
+            
+            idx_list = torch.cat((idx_list, idx_next.squeeze(0)))
+            
+            if is_model:
+                q_values_list.append(logit)
+                probs_list.append(prob)
+            
+            ply += 1
+            
+        
+        outcome = board.outcome()
+        
+        if outcome:
+            result = outcome.result()
+            termination = outcome.termination 
+        else:
+            result = "*"
+            termination = None
+            
+    
+    
+        win = None
+        
+        if result == "*":
+            win = 0.5
+            num_draws += 1
+        elif termination == chess.Termination.CHECKMATE:            
+            if (result == '1-0' and player_picker) or (result == '0-1' and not player_picker):
+                win = 1.0
+                num_wins += 1
+            else:
+                win = 0.0
+                num_lose += 1
+        elif termination == chess.Termination.THREEFOLD_REPETITION or termination == chess.Termination.FIFTY_MOVES:
+            win = 0.0
+            num_draws += 1
+        else:
+            win = 0.5
+            num_draws += 1
+        
+        probs = torch.hstack(probs_list).to(device)
+        #probs = torch.hstack(probs_list)
+        
+        prod_probs = torch.sum(probs)
+        
+        losses_for_logging.append(prod_probs.item())
+        
+        games_played += 1
+        
+        inner_loss = torch.nn.functional.binary_cross_entropy_with_logits(prod_probs.unsqueeze(0), torch.Tensor([win]).to(device)) / gradient_accumulation_steps
+        
+        inner_loss.backward()
+        
 
-            # calculate rewards for that trajectory
-            targets, masks = get_rewards(boards)
-
-            full_masks = torch.Tensor(pad_arrays(masks)).to(device)
-
-            full_targets = torch.Tensor(pad_arrays(targets)).to(device)
-
-            inputs = full_masks * probs
-
-            loss = loss_fn(inputs, full_targets) / full_masks.sum()
-
-            loss = loss / gradient_accumulation_steps
-
-            loss.backward()
-
-    #optimizer.zero_grad()
-    #loss.backward()
     optimizer.step()
+    
+    
+    if ((iter_num + 1) % update_period) == 0:
+        print("The past is now the present: prev model updated!")
+        prev_model.load_state_dict(model.state_dict())
+        prev_model.eval()
+        
 
 
     if (iter_num)% log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item()
+        lossf = prod_probs.item()
 
-        print(f"iter {iter_num}: loss {lossf:.4f}")
+        print(f"iter {iter_num}: loss {lossf:.9f}")
 
     iter_num += 1
     # run loss on trajectory

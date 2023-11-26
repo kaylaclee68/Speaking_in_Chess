@@ -21,22 +21,22 @@ from rl_utils import get_rewards, pad_arrays
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 epochs = 10
-out_dir = 'out_chess_llm_q_iteration_2'
-eval_interval = 100
+out_dir = 'out_chess_llm_q_iteration_legal'
+eval_interval = 50
 log_interval = 1
 eval_iters = 50
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
-checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_q_iteration/ckpt900.pt'
+checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_q_iteration_legal/ckpt200.pt'#/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_finetune_2/ckpt18000.pt'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'lichess'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset_path =  "/data/evan/CS285_Final_Project/data/ccc_processed.parquet" #change to lichess
-gradient_accumulation_steps = 10 # used to simulate larger batch sizes
-batch_size = 3 # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 16 # used to simulate larger batch sizes
+batch_size = 1 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 768
 # model
 n_layer = 12
@@ -192,8 +192,8 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             with ctx:
-                probs, boards = model.sample_trajectories(batch_size, tokenizer, device=device)
-            targets, masks = get_rewards(boards)
+                probs, boards, dones = model.sample_legal_trajectories(batch_size, tokenizer, device=device)
+            targets, masks = get_rewards(boards, dones)
 
             full_masks = torch.Tensor(pad_arrays(masks)).to(device)
 
@@ -209,6 +209,7 @@ def estimate_loss():
 
 loss_fn = torch.nn.BCEWithLogitsLoss(reduction='sum')
 
+optimizer.zero_grad(set_to_none=True)
 for i in range(max_iters):
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -240,16 +241,13 @@ for i in range(max_iters):
     if iter_num == 0 and eval_only:
         break
 
-    
-    optimizer.zero_grad()
     for micro_step in range(gradient_accumulation_steps):
         # sample entire trajectory batch
-
         with ctx:
-            probs, boards = model.sample_trajectories(batch_size, tokenizer, device=device)
+            probs, boards, dones = model.sample_legal_trajectories(batch_size, tokenizer, device=device)
 
             # calculate rewards for that trajectory
-            targets, masks = get_rewards(boards)
+            targets, masks = get_rewards(boards, dones)
 
             full_masks = torch.Tensor(pad_arrays(masks)).to(device)
 
@@ -261,11 +259,12 @@ for i in range(max_iters):
 
             loss = loss / gradient_accumulation_steps
 
-            loss.backward()
+        loss.backward()
 
-    #optimizer.zero_grad()
-    #loss.backward()
+        #optimizer.zero_grad()
+        #loss.backward()
     optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
 
 
     if (iter_num)% log_interval == 0 and master_process:

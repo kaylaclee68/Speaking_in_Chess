@@ -371,7 +371,7 @@ for epoch in range(epochs):
             break
 
         if X is None:
-            continue
+            break
 
 if ddp:
     destroy_process_group()
