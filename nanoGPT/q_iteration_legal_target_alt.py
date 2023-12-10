@@ -31,7 +31,7 @@ eval_iters = 50
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
-checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_finetune_2/ckpt18000.pt'
+checkpoint = "/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_q_iteration_legal_target_fixed/ckpt600.pt"#'/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm_finetune_2/ckpt18000.pt'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'lichess'
@@ -147,7 +147,7 @@ elif init_from == 'resume':
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-    iter_num = 0#checkpoint['iter_num']
+    iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 
 prev_model = GPT(gptconf)
@@ -167,8 +167,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-# if init_from == 'resume':
-#     optimizer.load_state_dict(checkpoint['optimizer'])
+if init_from == 'resume':
+    optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
 if compile:

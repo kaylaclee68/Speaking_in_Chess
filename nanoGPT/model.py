@@ -170,7 +170,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, mask_prompt_loss=False, prompt_len=0):
+    def forward(self, idx, targets=None, mask_prompt_loss=False, prompt_len=0, offline=False):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -187,7 +187,7 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss\
             logits = self.lm_head(x)
-            if not mask_prompt_loss:
+            if not mask_prompt_loss and not offline:
                 # X = [input_game || engine_prediction]; Y = X shift by 1
                 #loss (X[engine_prediciton], Y[engine_prediction])
                 #gradient of X[i] -> run gradients on all X j < i
@@ -206,6 +206,26 @@ class GPT(nn.Module):
                 # conversation <- only run loss on this
 
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=23253)
+            elif not mask_prompt_loss and offline:
+                log_probs = nn.functional.log_softmax(logits, dim=-1)
+
+                assert log_probs.shape == logits.shape, (log_probs.shape, logits.shape)
+
+                move_log_probs = torch.gather(log_probs, 2, idx.unsqueeze(2)).squeeze(2)
+
+                assert move_log_probs.shape == idx.shape, (move_log_probs.shape, idx.shape)
+
+                tau_log_prob_white = torch.sum(move_log_probs[:, 1::4], dim=-1)
+
+                tau_log_prob_black = torch.sum(move_log_probs[:, 3::4], dim=-1)
+
+                tau_log_probs = torch.stack([tau_log_prob_white, tau_log_prob_black]).T.flatten()
+
+
+                assert tau_log_probs.shape == targets.shape, (tau_log_probs.shape, targets.shape)
+
+                loss = F.binary_cross_entropy_with_logits(tau_log_probs, targets)
+
             else:
                 # print(prompt_len)
                 # print(logits[:, prompt_len:].shape)
@@ -258,7 +278,32 @@ class GPT(nn.Module):
         
         
         return idx_next, logit, prob
-        
+
+    @torch.no_grad()
+    def max_logit(self, idx: torch.Tensor, board, tokenizer: Tokenizer):
+
+        device = idx.device
+
+        idx = idx.unsqueeze(0)
+
+
+        logits, _ = self(idx)
+
+        logits = logits.flatten()
+
+
+        is_illegal, _ = self.get_is_illegal(board, tokenizer)
+
+        logits[is_illegal] = -float('Inf')
+
+        next_idx = torch.argmax(logits)
+
+        #print(next_idx)
+
+        value = logits[next_idx]
+
+        return value, next_idx
+
         
         
     def sample_trajectories(self, batch_size: int, tokenizer: Tokenizer, start_state: str = None, device='cuda') -> list[torch.Tensor]:
