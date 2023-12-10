@@ -703,12 +703,28 @@ class GPT(nn.Module):
         eos = tokenizer.encode("<eos>").ids[0]
         beams = [(idx, board.copy(), 0)]
 
-        for _ in range(max_new_tokens):
+        for beam_step in range(max_new_tokens):
             new_beams = []
             for beam_idx, beam_board, beam_score in beams: 
+             
+                turn_token_id = w_id if beam_board.turn == chess.WHITE else b_id
+                if beam_step != 0:
+                    beam_idx = torch.cat((beam_idx, torch.tensor([[turn_token_id]], device=beam_idx.device)), dim=1)
+                print("beam_idx.shape: ", beam_idx.shape)
+
+                print(beam_idx[:, -self.config.block_size:])
+                print(tokenizer.decode(beam_idx[:, -self.config.block_size:].tolist()[0]))
+
                 logits, _ = self(beam_idx[:, -self.config.block_size:]) 
                 logits = logits[:, -1, :] / temperature  
-                if top_k is not None: 
+
+                is_illegal, _ = self.get_is_illegal(beam_board, tokenizer) 
+                is_illegal = is_illegal.unsqueeze(0)
+                logits[is_illegal] = -float('Inf')
+
+                logits = nn.functional.log_softmax(logits)
+
+                if top_k is not None:
                     top_values, top_indices = torch.topk(logits, top_k) 
                 else: 
                     top_values, top_indices = torch.sort(logits, descending=True)
