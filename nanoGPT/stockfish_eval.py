@@ -1,6 +1,7 @@
 from stockfish import Stockfish
 from model import GPTConfig, GPT
 from tokenizers import Tokenizer
+from chess import pgn
 from tqdm import tqdm
 
 import chess
@@ -75,17 +76,21 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
 
     for i in tqdm(range(rounds)):
         board = chess.Board()
+        game = chess.pgn.Game() # use to record game as pgn
+
         turn_list = torch.IntTensor([]).to(device)
 
-        if mode == "white": # determine who goes first
+        if mode == "white" or (mode == "random" and bool(random.getrandbits(1))): # determine who goes first
             first = 0
-        elif mode == "black":
-            first = 1
+            game.headers["White"] = "Model"
+            game.headers["Black"] = "Stockfish"
         else:
-            if bool(random.getrandbits(1)):
-                first = 0
-            else:
-                first = 1
+            first = 1
+            game.headers["White"] = "Stockfish"
+            game.headers["Black"] = "Model"
+
+        game.setup(board)
+        node = game
 
         num_moves_so_far = 0
 
@@ -93,17 +98,19 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
             turn = num_moves_so_far % 2
             if turn == first:
                 move, turn_list = make_move(board, model, tokenizer, num_moves_so_far, turn_list, device)
+                node = node.add_variation(board.parse_san(move))
             else:
                 stockfish.set_fen_position(board.fen())
-                uci_move = chess.Move.from_uci(stockfish.get_best_move())
+                from_uci_move = chess.Move.from_uci(stockfish.get_best_move())
 
-                id = tokenizer.token_to_id(board.lan(uci_move))
+                id = tokenizer.token_to_id(board.lan(from_uci_move))
 
                 turn_list = torch.cat((turn_list, 
                                        torch.IntTensor([turn]).to(device), 
                                        torch.IntTensor([id]).to(device)))
 
-                move = board.san(uci_move)
+                move = board.san(from_uci_move)
+                node = node.add_variation(from_uci_move)
 
             board.push_san(move)
 
@@ -133,6 +140,10 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
 
         print(stockfish.get_board_visual())
 
+        game.headers["Results"] = board.result()
+
+        print(game, file=open(f"eval_games/game{i}.pgn", "w"), end="\n\n")
+
     return game_log, num_wins, num_lose, num_draws
 
 
@@ -148,7 +159,7 @@ if __name__ == "__main__":
         "random"
     ], default="white")
     parser.add_argument("--tokenizer-file", type=str, default="/data/evan/CS285_Final_Project/model/tokenizer.model")
-    parser.add_argument("--max-round", type=int, default=100)
+    parser.add_argument("--max-round", type=int, default=200)
     args = parser.parse_args()
     print(args)
 
@@ -157,7 +168,7 @@ if __name__ == "__main__":
     model = load_model(args.checkpoint_file, args.device)
 
     # load stockfish
-    stockfish = Stockfish()
+    stockfish = Stockfish(parameters={"Slow Mover":1, "Minimum Thinking Time":20})
     stockfish.set_elo_rating(args.elo)
 
     print(f"Stockfish Stats:\n{stockfish.get_parameters()}")
