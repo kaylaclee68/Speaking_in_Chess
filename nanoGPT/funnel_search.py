@@ -51,7 +51,7 @@ def collect_funnel(model: GPT,
                                        board,
                                        temperature,
                                        device,
-                                       0,
+                                       1,
                                        max_round)
     
     return trajectories
@@ -113,12 +113,12 @@ if __name__ == "__main__":
     # create a k sequence
     k_seqs = [5 for i in range(200)]
     m_seqs = []
-    for i in range(40):
-        m_seqs.extend([i + 1] * 5) # this k seqs increment k by 1 every 5 moves
+    for i in range(20):
+        m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs increment k by 1 every 5 moves
 
     trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
-    len(trajs)
+    print(len(trajs))
 
     # train(model,
     #       tokenizer,

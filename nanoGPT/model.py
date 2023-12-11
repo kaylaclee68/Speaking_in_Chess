@@ -833,17 +833,19 @@ class GPT(nn.Module):
                 idx, board, score = info
                 logits_sum, idx_next = all_logits[i], all_idx_next[i]
                 
-                # print(board)
-                # print(idx)                    
+                move = tokenizer.id_to_token(idx_next)
                 
-                idx = torch.cat((idx,
-                                 torch.IntTensor([turn_id]).to(device),
-                                 idx_next.squeeze(0)))
-                
-                new_board = board.copy()
-                new_board.push_san(tokenizer.id_to_token(idx_next))
-                
-                if board.is_game_over(): # stop this beam if game ends
+                try:
+                    new_board = board.copy()
+                    new_board.push_san(move)
+
+                    idx = torch.cat((idx,
+                                    torch.IntTensor([turn_id]).to(device),
+                                    idx_next.squeeze(0)))
+                except ValueError:
+                    continue
+
+                if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
                 else:
                     new_beams.append((idx, new_board, logits_sum))
