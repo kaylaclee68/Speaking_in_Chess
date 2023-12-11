@@ -113,12 +113,28 @@ if __name__ == "__main__":
     # create a k sequence
     k_seqs = [5 for i in range(200)]
     m_seqs = []
-    for i in range(20):
-        m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs increment k by 1 every 5 moves
+    # for i in range(20):
+    #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
+    for i in range(40):
+        m_seqs.extend([i + 1] * 10)
 
     trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
     print(len(trajs))
+    traj = trajs[0][0]
+    moves = [tokenizer.id_to_token(id) for id in traj[1::2]]
+    print(moves)
+
+    game = chess.pgn.Game()
+    board = chess.Board()
+    game.setup(board)
+    node = game
+    for move in moves:
+        node = node.add_variation(board.parse_san(move))
+        board.push_san(move)
+
+    print(game, file=open(f"funnel_games/game{0}.pgn", "w"), end="\n\n")
+    
 
     # train(model,
     #       tokenizer,

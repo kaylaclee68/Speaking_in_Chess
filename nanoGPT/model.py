@@ -816,13 +816,13 @@ class GPT(nn.Module):
 
                 idx_next, logits, _ = self.get_next_move(idx, board, tokenizer, temperature, k)
                 
-                logits = logits.squeeze() + score # sum logits in this trajectory
+                # sum logprob logits in this trajectory
+                logits = nn.functional.log_softmax(logits.squeeze(), dim=0) + score 
 
                 all_logits = torch.cat((all_logits, logits))
                 all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
-
-            log_max = nn.functional.log_softmax(all_logits, dim=0)
-            _, indices = torch.topk(log_max, m) # pick top m beams
+        
+            _, indices = torch.topk(all_logits, min(m, len(all_logits))) # pick top m beams
 
             all_logits[indices]
             all_idx_next = all_idx_next[indices]
@@ -847,6 +847,7 @@ class GPT(nn.Module):
 
                 if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
+                    print(logits_sum)
                 else:
                     new_beams.append((idx, new_board, logits_sum))
             
