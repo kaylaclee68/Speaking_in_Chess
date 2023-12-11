@@ -10,6 +10,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 import inspect
 from dataclasses import dataclass
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -17,6 +18,7 @@ from torch.nn import functional as F
 import chess
 from tokenizers import Tokenizer
 import time
+import numpy as np
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -241,8 +243,12 @@ class GPT(nn.Module):
 
         return logits, loss
     
-    def get_next_move(self, idx: torch.Tensor, board, tokenizer: Tokenizer, temperature: float = 0.1) -> str:
-        
+    def get_next_move(self, 
+                      idx: torch.Tensor, 
+                      board: chess.Board, 
+                      tokenizer: Tokenizer, 
+                      temperature: float = 0.1, 
+                      k: int = 1) -> str:
         device = idx.device
         
         idx = idx.unsqueeze(0)
@@ -250,34 +256,23 @@ class GPT(nn.Module):
         logits, _ = self(idx)
         
         legality_mask_list = []
-
         is_illegal, _ = self.get_is_illegal(board, tokenizer)
         legality_mask_list.append(is_illegal)
-            
         legality_mask = torch.vstack(legality_mask_list).to(device)
-        
         logits_legal = logits.clone() / temperature
         logits_legal[legality_mask.unsqueeze(1)] = -float('Inf')
 
         action_distribution = torch.distributions.categorical.Categorical(logits=logits_legal)
 
-        idx_next = action_distribution.sample()
-        
-        # print(idx_next)
-        
-        # print(idx.shape)
-        # print(idx_next.shape)
-        # print(logits.shape)
-        # print(legality_mask.shape)
-        
-        
-        
+        idx_next = action_distribution.sample((k, )) # sample k
+
+        idx_next = idx_next.squeeze(0) # need to squeeze
         
         prob = action_distribution.log_prob(idx_next)
         logit = logits[:, :, idx_next]
         
-        
         return idx_next, logit, prob
+
 
     @torch.no_grad()
     def max_logit(self, idx: torch.Tensor, board, tokenizer: Tokenizer):
@@ -729,10 +724,6 @@ class GPT(nn.Module):
     #                     new_board.push_san(move)
     #                     new_boards.append(new_board)
 
-
-
-
-
            
     #     return moves
     @torch.no_grad()
@@ -751,17 +742,18 @@ class GPT(nn.Module):
         for beam_step in range(max_new_tokens):
             new_beams = []
             for beam_idx, beam_board, beam_score in beams: 
-             
+            
                 turn_token_id = w_id if beam_board.turn == chess.WHITE else b_id
                 if beam_step != 0:
-                    beam_idx = torch.cat((beam_idx, torch.tensor([[turn_token_id]], device=beam_idx.device)), dim=1)
-                print("beam_idx.shape: ", beam_idx.shape)
+                    beam_idx = torch.cat((beam_idx, torch.tensor([turn_token_id], device=beam_idx.device)))
+                # print("beam_idx.shape: ", beam_idx.shape)
 
-                print(beam_idx[:, -self.config.block_size:])
-                print(tokenizer.decode(beam_idx[:, -self.config.block_size:].tolist()[0]))
+                # print(beam_idx[:, -self.config.block_size:])
+                # print(tokenizer.decode(beam_idx[:, -self.config.block_size:].tolist()[0]))
 
-                logits, _ = self(beam_idx[:, -self.config.block_size:]) 
-                logits = logits[:, -1, :] / temperature  
+                logits, _ = self(beam_idx[-self.config.block_size])
+                print(f"logits.shape: {logits.shape}")
+                logits = logits[:, -1, :] / temperature 
 
                 is_illegal, _ = self.get_is_illegal(beam_board, tokenizer) 
                 is_illegal = is_illegal.unsqueeze(0)
@@ -792,3 +784,73 @@ class GPT(nn.Module):
                 break
         best_sequence, best_board, _ = max(beams, key=lambda x: x[2])
         return best_sequence, best_board
+
+
+    @torch.no_grad()
+    # This is ICLR google deepmind microsoft research level code right here!
+    # Collects game trajectories using novel funnel search rl
+    # k_seqs: a scheduler for k -> how many fanout sample at state i
+    # m_seqs: a scheduler for m -> how many top beam we choose at state i
+    def funnel_search(self, 
+                      start_idx: torch.Tensor,
+                      k_seqs: list,
+                      m_seqs: list,
+                      tokenizer: Tokenizer, 
+                      start_board: chess.Board,
+                      temperature: float,
+                      device: str,
+                      batch_size: int,
+                      max_round: int):
+        all_beams = []
+        beams = [(start_idx, start_board.copy(), 0) for _ in range(m_seqs[0])]
+
+        for turn in tqdm(range(max_round)):
+            k = k_seqs[turn]
+            m = m_seqs[turn]
+            turn_id = turn % 2
+
+            all_logits = torch.tensor([]).to(device)
+            all_idx_next = torch.IntTensor([]).to(device)
+            for idx, board, score in beams:
+                idx = torch.cat((idx, torch.IntTensor([turn_id]).to(device)))
+
+                idx_next, logits, _ = self.get_next_move(idx, board, tokenizer, temperature, k)
+                
+                logits = logits.squeeze() + score # sum logits in this trajectory
+
+                all_logits = torch.cat((all_logits, logits))
+                all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
+
+            log_max = nn.functional.log_softmax(all_logits, dim=0)
+            _, indices = torch.topk(log_max, m) # pick top m beams
+
+            all_logits[indices]
+            all_idx_next = all_idx_next[indices]
+
+            new_beams = []
+            beams = [beams[i] for i in (indices // k)]
+            for i, info in enumerate(beams): # since we extend k nodes per beam
+                idx, board, score = info
+                logits_sum, idx_next = all_logits[i], all_idx_next[i]
+                
+                # print(board)
+                # print(idx)                    
+                
+                idx = torch.cat((idx,
+                                 torch.IntTensor([turn_id]).to(device),
+                                 idx_next.squeeze(0)))
+                
+                new_board = board.copy()
+                new_board.push_san(tokenizer.id_to_token(idx_next))
+                
+                if board.is_game_over(): # stop this beam if game ends
+                    all_beams.append((idx, new_board, logits_sum))
+                else:
+                    new_beams.append((idx, new_board, logits_sum))
+            
+            if len(new_beams) == 0:
+                return all_beams
+            
+            beams = new_beams # account for incrementing m since new_beams is dynamic
+
+        return all_beams.extend(beams)
