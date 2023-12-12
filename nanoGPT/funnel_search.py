@@ -96,10 +96,16 @@ def train(model: GPT,
           batch_size: int,
           max_round: int,
           eval_freq: int):
+    learning_rate = 6e-4 # max learning rate
+    max_iters = 600000 # total number of training iterations
+    weight_decay = 0.0
+    beta1 = 0.9
+    beta2 = 0.95
+
     # dtype = 'bfloat16'
     # ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
     # ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=ptdtype)
-    
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
     for i in tqdm(range(iterations)):
 
         # train
@@ -111,6 +117,9 @@ def train(model: GPT,
                                       temperature,
                                       device,
                                       max_round)
+        gradient_accumulation_steps = len(trajectories) // batch_size
+        if len(trajectories) % batch_size != 0:
+            gradient_accumulation_steps += 1
         
         for i in range(0, len(trajectories), batch_size):
             batch = trajectories[i:i+batch_size]
@@ -130,11 +139,18 @@ def train(model: GPT,
                 w = int(outcome == '1-0')
                 b = int(outcome == '0-1')
                 Y = torch.cat((Y, torch.tensor([w, b]).to(device).unsqueeze(0)), dim=0)
-        
-            _, loss = model.forward(idx=X, targets=Y.flatten(), offline=True)
 
-        print(f"loss: {loss}")
-        print(Y)
+            _, loss = model(idx=X, targets=Y.flatten(), offline=True)
+            loss = loss / gradient_accumulation_steps
+
+            loss.backward()
+            
+            print("\n**********************\n")
+            print(f"loss: {loss}")
+            print(Y)
+
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
         # # validation
         # eval = i % eval_freq == 0 # record game every pgn-freq step
         # if eval:
@@ -172,26 +188,26 @@ if __name__ == "__main__":
     tokenizer.enable_truncation(checkpoint_args["block_size"] + 1)
 
     # create a k sequence
-    k_seqs = [2 for i in range(200)]
+    k_seqs = [0.7 for i in range(200)]
     m_seqs = [1]
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([500])
+        m_seqs.extend([1000])
 
-    # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
+    trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
-    # print(f"**** Number of trajectories collected: {len(trajs)} ****")
-    # save_games(trajs, tokenizer, args.num_save_games)
+    print(f"**** Number of trajectories collected: {len(trajs)} ****")
+    save_games(trajs, tokenizer, args.num_save_games)
     
 
-    train(model,
-          tokenizer,
-          k_seqs,
-          m_seqs,
-          args.num_iter, 
-          args.temperature, 
-          args.device, 
-          args.batch_size,
-          args.max_round,
-          args.eval_freq)
+    # train(model,
+    #       tokenizer,
+    #       k_seqs,
+    #       m_seqs,
+    #       args.num_iter, 
+    #       args.temperature, 
+    #       args.device, 
+    #       args.batch_size,
+    #       args.max_round,
+    #       args.eval_freq)

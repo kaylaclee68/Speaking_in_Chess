@@ -813,13 +813,17 @@ class GPT(nn.Module):
         beams = [(start_idx, start_board.copy(), 0) for _ in range(m_seqs[0])]
 
         for turn in tqdm(range(max_round)):
-            k = k_seqs[turn]
+            prob = k_seqs[turn]
             m = m_seqs[turn]
             turn_id = turn % 2
 
+            beam_idx = torch.IntTensor([]).to(device)
             all_logits = torch.tensor([]).to(device)
             all_idx_next = torch.IntTensor([]).to(device)
-            for idx, board, score in beams:
+            for i, info in enumerate(beams):
+                idx, board, score = info
+
+                k = np.random.choice([1, 2], p=[1-prob, prob])
                 idx = torch.cat((idx, torch.IntTensor([turn_id]).to(device)))
 
                 idx_next, logits, _ = self.get_next_move(idx, board, tokenizer, temperature, k)
@@ -830,20 +834,28 @@ class GPT(nn.Module):
                     idx_next = idx_next.unsqueeze(0)
                 
                 # sum logprob logits in this trajectory
-                logits = nn.functional.log_softmax(logits, dim=0) + score 
+                logits = nn.functional.log_softmax(logits, dim=0) + score
 
                 all_logits = torch.cat((all_logits, logits))
                 all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
-        
+
+                beam_idx = torch.concat((beam_idx, 
+                                         torch.full((k, ), i).to(device))) # extend by k number of index
+
+            assert len(beam_idx) == len(all_logits)
             _, indices = torch.topk(all_logits, min(m, len(all_logits))) # pick top m beams
 
-            all_logits[indices]
-            all_idx_next = all_idx_next[indices]
+            print(len(indices))
+
+            all_logits = all_logits[indices]
+            all_idx_next = all_idx_next[indices] 
+            beam_idx = beam_idx[indices]
+
+            assert len(all_logits) == len(all_idx_next) == len(beam_idx)
 
             new_beams = []
-            beams = [beams[i] for i in (indices // k)]
-            for i, info in enumerate(beams): # since we extend k nodes per beam
-                idx, board, score = info
+            for i in beam_idx: # since we extend k nodes per beam
+                idx, board, score = beams[i]
                 logits_sum, idx_next = all_logits[i], all_idx_next[i]
                 
                 move = tokenizer.id_to_token(idx_next)
@@ -860,12 +872,12 @@ class GPT(nn.Module):
 
                 if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
-                    # print(logits_sum)
+                    print(logits_sum)
                     counter += 1
                 else:
                     new_beams.append((idx, new_board, logits_sum))
             
-            if counter >= m or len(new_beams) == 0:
+            if counter > m or len(new_beams) == 0:
                 return all_beams
             
             beams = new_beams # account for incrementing m since new_beams is dynamic
