@@ -3,7 +3,6 @@ from tokenizers import Tokenizer
 from contextlib import nullcontext
 from chess import pgn
 from tqdm import tqdm
-from pytorch_forecasting import utils
 
 import chess
 import torch
@@ -174,11 +173,11 @@ if __name__ == "__main__":
 
     # create a k sequence
     k_seqs = [2 for i in range(200)]
-    m_seqs = []
+    m_seqs = [1]
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([50])
+        m_seqs.extend([500])
 
     # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
