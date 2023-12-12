@@ -1,13 +1,19 @@
 from model import GPTConfig, GPT
 from tokenizers import Tokenizer
+from contextlib import nullcontext
 from chess import pgn
 from tqdm import tqdm
+from pytorch_forecasting import utils
 
 import chess
 import torch
+import torch.nn as nn
 import argparse
 import random
 import numpy as np
+
+
+PAD_TOKEN = 23253
 
 
 def load_model(path, device):
@@ -84,29 +90,59 @@ def collect_funnel(model: GPT,
 def train(model: GPT, 
           tokenizer: Tokenizer,
           k_seqs: list,
+          m_seqs: list,
           iterations: int, 
           temperature: float, 
-          device: str, 
+          device: str,
+          batch_size: int,
           max_round: int,
-          pgn_freq: int):
+          eval_freq: int):
+    # dtype = 'bfloat16'
+    # ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+    # ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=ptdtype)
     
-    for i in tqdm(iterations):
-        board = chess.Board()
+    for i in tqdm(range(iterations)):
 
         # train
-        model.funnel_search(torch.Tensor([]).to(device),
-                            k_seqs,
-                            tokenizer,
-                            board,
-                            temperature,
-                            m)
+        # with ctx:
+        trajectories = collect_funnel(model,
+                                      tokenizer,
+                                      k_seqs,
+                                      m_seqs,
+                                      temperature,
+                                      device,
+                                      max_round)
+        
+        for i in range(0, len(trajectories), batch_size):
+            batch = trajectories[i:i+batch_size]
+            X = torch.IntTensor([]).to(device)
+            Y = torch.IntTensor([]).to(device)
 
-        # validation
-        record = i % pgn_freq == 0 # record game every pgn-freq step
-        if record:
-            game = chess.pgn.Game()
-            game.setup(board)
-            node = game
+            for idx, board, _ in batch:
+                print(X.size())
+                pad_length = max(X.size()[-1], idx.size()[0])
+                X = torch.cat((nn.functional.pad(X, (0, pad_length), "constant", PAD_TOKEN), 
+                               nn.functional.pad(idx.unsqueeze(0), (0, pad_length), "constant", PAD_TOKEN)), 
+                               dim=0)
+
+                outcome = board.outcome().result()
+                result = torch.IntTensor([int(outcome[0]), int(outcome[2])]).to(device)
+                Y = torch.cat((Y, result.unsqueeze(0)), dim=0)
+        
+            print("***********************")
+            print(X)
+            print("***********************")
+            print(Y)
+            _, loss = model.forward(idx=X, targets=Y, offline=True)
+
+        print(loss)
+        # # validation
+        # eval = i % eval_freq == 0 # record game every pgn-freq step
+        # if eval:
+        #     game = chess.pgn.Game()
+        #     game.setup(board)
+        #     node = game
+
 
     return
 
@@ -116,10 +152,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-file", type=str, required=True)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--tokenizer-file", type=str, default="../model/tokenizer.model")
-    # parser.add_argument("--num-iter", type=int, required=True)
+    parser.add_argument("--num-iter", type=int, required=True)
+    parser.add_argument("--batch-size", type=int, default=10)
     parser.add_argument("--max-round", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=1)
-    parser.add_argument("--pgn-freq", type=int, default=100)
+    parser.add_argument("--eval-freq", type=int, default=100)
     parser.add_argument("--num-save-games", type=int, default=0)
     args = parser.parse_args()
     print(args)
@@ -136,25 +173,26 @@ if __name__ == "__main__":
     tokenizer.enable_truncation(checkpoint_args["block_size"] + 1)
 
     # create a k sequence
-    k_seqs = [5 for i in range(200)]
-    m_seqs = [1] * 10 + [2] * 10 + [10] * 10 + [30] * 10 + [50] * 10
+    k_seqs = [2 for i in range(200)]
+    m_seqs = []
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([100])
-    print(m_seqs)
+        m_seqs.extend([10])
 
-    trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
+    # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
-    print(f"**** Number of trajectories collected: {len(trajs)} ****")
-    save_games(trajs, tokenizer, args.num_save_games)
+    # print(f"**** Number of trajectories collected: {len(trajs)} ****")
+    # save_games(trajs, tokenizer, args.num_save_games)
     
 
-    # train(model,
-    #       tokenizer,
-    #       args.k_seqs,
-    #       args.num_iter, 
-    #       args.temperature, 
-    #       args.device, 
-    #       args.max_round,
-    #       args.pgn_freq)
+    train(model,
+          tokenizer,
+          k_seqs,
+          m_seqs,
+          args.num_iter, 
+          args.temperature, 
+          args.device, 
+          args.batch_size,
+          args.max_round,
+          args.eval_freq)

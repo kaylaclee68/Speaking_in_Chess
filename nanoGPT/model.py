@@ -20,6 +20,10 @@ from tokenizers import Tokenizer
 import time
 import numpy as np
 
+
+PAD_TOKEN = 23253
+
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -207,13 +211,15 @@ class GPT(nn.Module):
                 # prompt <- treat prompt as static input
                 # conversation <- only run loss on this
 
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=23253)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=PAD_TOKEN)
             elif not mask_prompt_loss and offline:
                 log_probs = nn.functional.log_softmax(logits, dim=-1)
 
                 assert log_probs.shape == logits.shape, (log_probs.shape, logits.shape)
 
                 move_log_probs = torch.gather(log_probs, 2, idx.unsqueeze(2)).squeeze(2)
+
+                move_log_probs.clone()[idx == PAD_TOKEN] = 0 # set log prob with index
 
                 assert move_log_probs.shape == idx.shape, (move_log_probs.shape, idx.shape)
 
@@ -222,7 +228,6 @@ class GPT(nn.Module):
                 tau_log_prob_black = torch.sum(move_log_probs[:, 3::4], dim=-1)
 
                 tau_log_probs = torch.stack([tau_log_prob_white, tau_log_prob_black]).T.flatten()
-
 
                 assert tau_log_probs.shape == targets.shape, (tau_log_probs.shape, targets.shape)
 
@@ -234,7 +239,7 @@ class GPT(nn.Module):
                 # print(logits.shape)
                 # print(targets.shape)
 
-                loss = F.cross_entropy(logits[:, prompt_len:].contiguous().view(-1, logits.size(-1)), targets.view(-1), ignore_index=23253)
+                loss = F.cross_entropy(logits[:, prompt_len:].contiguous().view(-1, logits.size(-1)), targets.view(-1), ignore_index=PAD_TOKEN)
 
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -363,7 +368,7 @@ class GPT(nn.Module):
 
                 # else:
                 #     # if it is done, stick a pad token instead
-                #     idx_next[i] = 23253
+                #     idx_next[i] = PAD_TOKEN
 
             board_time += time.time() - start
             # check if this cuts gradients in a bad way
@@ -857,5 +862,5 @@ class GPT(nn.Module):
                 return all_beams
             
             beams = new_beams # account for incrementing m since new_beams is dynamic
-
-        return all_beams
+    
+        return all_beams.extend(beams)
