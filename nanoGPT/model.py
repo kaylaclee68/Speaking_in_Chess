@@ -813,7 +813,7 @@ class GPT(nn.Module):
         beams = [(start_idx, start_board.copy(), 0) for _ in range(m_seqs[0])]
 
         for turn in tqdm(range(max_round)):
-            prob = k_seqs[turn]
+            prob = k_seqs_prob[turn]
             m = m_seqs[turn]
             turn_id = turn % 2
 
@@ -839,13 +839,13 @@ class GPT(nn.Module):
                 all_logits = torch.cat((all_logits, logits))
                 all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
 
-                beam_idx = torch.concat((beam_idx, 
-                                         torch.full((k, ), i).to(device))) # extend by k number of index
+                beam_idx = torch.concat((beam_idx, torch.tensor([i]*k).to(device))) # extend by k number of index
 
             assert len(beam_idx) == len(all_logits)
             _, indices = torch.topk(all_logits, min(m, len(all_logits))) # pick top m beams
 
-            print(len(indices))
+            # print('idxes', indices)
+            # print('beams_idx', beam_idx)
 
             all_logits = all_logits[indices]
             all_idx_next = all_idx_next[indices] 
@@ -854,9 +854,9 @@ class GPT(nn.Module):
             assert len(all_logits) == len(all_idx_next) == len(beam_idx)
 
             new_beams = []
-            for i in beam_idx: # since we extend k nodes per beam
+            for j, i in enumerate(beam_idx): # since we extend k nodes per beam
                 idx, board, score = beams[i]
-                logits_sum, idx_next = all_logits[i], all_idx_next[i]
+                logits_sum, idx_next = all_logits[j], all_idx_next[j]
                 
                 move = tokenizer.id_to_token(idx_next)
                 
@@ -867,19 +867,23 @@ class GPT(nn.Module):
                     idx = torch.cat((idx,
                                     torch.IntTensor([turn_id]).to(device),
                                     idx_next.squeeze(0)))
-                except ValueError:
+                except ValueError as e:
+                    print(e)
                     continue
 
                 if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
-                    print(logits_sum)
+                    # print('sum', logits_sum)
                     counter += 1
                 else:
                     new_beams.append((idx, new_board, logits_sum))
             
             if counter > m or len(new_beams) == 0:
+                # print(m, counter)
+                # print(len(new_beams))
                 return all_beams
             
             beams = new_beams # account for incrementing m since new_beams is dynamic
     
-        return all_beams.extend(beams)
+        all_beams.extend(beams)
+        return all_beams

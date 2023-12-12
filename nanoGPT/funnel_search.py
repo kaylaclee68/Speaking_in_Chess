@@ -104,19 +104,20 @@ def train(model: GPT,
 
     # dtype = 'bfloat16'
     # ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-    # ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=ptdtype)
+    ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=torch.bfloat16)
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
+    optimizer.zero_grad(set_to_none=True)
     for i in tqdm(range(iterations)):
 
         # train
-        # with ctx:
-        trajectories = collect_funnel(model,
-                                      tokenizer,
-                                      k_seqs,
-                                      m_seqs,
-                                      temperature,
-                                      device,
-                                      max_round)
+        with ctx:
+            trajectories = collect_funnel(model,
+                                        tokenizer,
+                                        k_seqs,
+                                        m_seqs,
+                                        temperature,
+                                        device,
+                                        max_round)
         gradient_accumulation_steps = len(trajectories) // batch_size
         if len(trajectories) % batch_size != 0:
             gradient_accumulation_steps += 1
@@ -157,8 +158,6 @@ def train(model: GPT,
         #     game = chess.pgn.Game()
         #     game.setup(board)
         #     node = game
-
-
     return
 
 
@@ -169,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer-file", type=str, default="../model/tokenizer.model")
     parser.add_argument("--num-iter", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=10)
-    parser.add_argument("--max-round", type=int, default=200)
+    parser.add_argument("--max-round", type=int, default=124)
     parser.add_argument("--temperature", type=float, default=1)
     parser.add_argument("--eval-freq", type=int, default=100)
     parser.add_argument("--num-save-games", type=int, default=0)
@@ -188,26 +187,26 @@ if __name__ == "__main__":
     tokenizer.enable_truncation(checkpoint_args["block_size"] + 1)
 
     # create a k sequence
-    k_seqs = [0.7 for i in range(200)]
+    k_seqs = [0.07 for i in range(200)]
     m_seqs = [1]
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([1000])
+        m_seqs.extend([256])
 
-    trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
+    # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
-    print(f"**** Number of trajectories collected: {len(trajs)} ****")
-    save_games(trajs, tokenizer, args.num_save_games)
+    # print(f"**** Number of trajectories collected: {len(trajs)} ****")
+    # save_games(trajs, tokenizer, args.num_save_games)
     
 
-    # train(model,
-    #       tokenizer,
-    #       k_seqs,
-    #       m_seqs,
-    #       args.num_iter, 
-    #       args.temperature, 
-    #       args.device, 
-    #       args.batch_size,
-    #       args.max_round,
-    #       args.eval_freq)
+    train(model,
+          tokenizer,
+          k_seqs,
+          m_seqs,
+          args.num_iter, 
+          args.temperature, 
+          args.device, 
+          args.batch_size,
+          args.max_round,
+          args.eval_freq)
