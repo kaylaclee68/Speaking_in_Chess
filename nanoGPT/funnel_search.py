@@ -172,7 +172,7 @@ if __name__ == "__main__":
     tokenizer.enable_truncation(checkpoint_args["block_size"] + 1)
 
     # create a k sequence
-    k_seqs = [2 for i in range(200)]
+    k_seqs = [0.1 for i in range(200)]
     m_seqs = [1]
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
