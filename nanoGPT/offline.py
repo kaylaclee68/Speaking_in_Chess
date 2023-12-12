@@ -35,19 +35,20 @@ from sampler import BatchShuffleSampler
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out_chess_llm_offline'
+out_dir = 'out_chess_llm_offline_fixed'
 eval_interval = 1000
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'lichess'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset_name = 'evanfrick/lichess' #change to lichess
+checkpoint = '/data/evan/CS285_Final_Project/nanoGPT/out_chess_llm/ckpt28000.pt'
 gradient_accumulation_steps = 5 # used to simulate larger batch sizes
 batch_size = 128 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 768
@@ -214,9 +215,9 @@ if init_from == 'scratch':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
+    print(f"Resuming training from {checkpoint}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = checkpoint
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -234,7 +235,7 @@ elif init_from == 'resume':
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
+    iter_num = 0 #checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
@@ -255,8 +256,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
+# if init_from == 'resume':
+#     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
 # compile the model

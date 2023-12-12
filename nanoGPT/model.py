@@ -219,13 +219,15 @@ class GPT(nn.Module):
 
                 move_log_probs = torch.gather(log_probs, 2, idx.unsqueeze(2)).squeeze(2)
 
-                move_log_probs.clone()[idx == PAD_TOKEN] = 0 # set log prob with index
+                move_log_probs_clone = move_log_probs.clone()
+                
+                move_log_probs_clone[idx == PAD_TOKEN] = 0.0 # set log prob with index
 
-                assert move_log_probs.shape == idx.shape, (move_log_probs.shape, idx.shape)
+                assert move_log_probs_clone.shape == idx.shape, (move_log_probs_clone.shape, idx.shape)
 
-                tau_log_prob_white = torch.sum(move_log_probs[:, 1::4], dim=-1)
+                tau_log_prob_white = torch.sum(move_log_probs_clone[:, 1::4], dim=-1)
 
-                tau_log_prob_black = torch.sum(move_log_probs[:, 3::4], dim=-1)
+                tau_log_prob_black = torch.sum(move_log_probs_clone[:, 3::4], dim=-1)
 
                 tau_log_probs = torch.stack([tau_log_prob_white, tau_log_prob_black]).T.flatten()
 
