@@ -116,26 +116,26 @@ def train(model: GPT,
         for i in range(0, len(trajectories), batch_size):
             batch = trajectories[i:i+batch_size]
             X = torch.IntTensor([]).to(device)
-            Y = torch.IntTensor([]).to(device)
+            Y = torch.tensor([]).to(device)
 
-            for idx, board, _ in batch:
-                print(X.size())
-                pad_length = max(X.size()[-1], idx.size()[0])
-                X = torch.cat((nn.functional.pad(X, (0, pad_length), "constant", PAD_TOKEN), 
-                               nn.functional.pad(idx.unsqueeze(0), (0, pad_length), "constant", PAD_TOKEN)), 
-                               dim=0)
+            for idx, board, _ in batch: # I hate pytorch
+                if X.size()[0] > 0:
+                    pad_length = max(X.size()[-1], idx.size()[0])
+                    X = torch.cat((nn.functional.pad(X, (0, pad_length - X.size()[-1]), "constant", PAD_TOKEN), 
+                                   nn.functional.pad(idx.unsqueeze(0), (0, pad_length - idx.size()[0]), "constant", PAD_TOKEN)), 
+                                   dim=0)
+                else:
+                    X = torch.cat((X, idx.unsqueeze(0)), dim=0)
 
                 outcome = board.outcome().result()
-                result = torch.IntTensor([int(outcome[0]), int(outcome[2])]).to(device)
-                Y = torch.cat((Y, result.unsqueeze(0)), dim=0)
+                w = int(outcome == '1-0')
+                b = int(outcome == '0-1')
+                Y = torch.cat((Y, torch.tensor([w, b]).to(device).unsqueeze(0)), dim=0)
         
-            print("***********************")
-            print(X)
-            print("***********************")
-            print(Y)
-            _, loss = model.forward(idx=X, targets=Y, offline=True)
+            _, loss = model.forward(idx=X, targets=Y.flatten(), offline=True)
 
-        print(loss)
+        print(f"loss: {loss}")
+        print(Y)
         # # validation
         # eval = i % eval_freq == 0 # record game every pgn-freq step
         # if eval:
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([10])
+        m_seqs.extend([50])
 
     # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 

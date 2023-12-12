@@ -855,7 +855,7 @@ class GPT(nn.Module):
 
                 if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
-                    print(logits_sum)
+                    # print(logits_sum)
                     counter += 1
                 else:
                     new_beams.append((idx, new_board, logits_sum))
