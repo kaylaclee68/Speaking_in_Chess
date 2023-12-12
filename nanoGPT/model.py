@@ -800,7 +800,7 @@ class GPT(nn.Module):
     # m_seqs: a scheduler for m -> how many top beam we choose at state i
     def funnel_search(self, 
                       start_idx: torch.Tensor,
-                      k_seqs: list,
+                      k_seqs_prob: list,
                       m_seqs: list,
                       tokenizer: Tokenizer, 
                       start_board: chess.Board,
