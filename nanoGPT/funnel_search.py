@@ -7,6 +7,7 @@ import chess
 import torch
 import argparse
 import random
+import numpy as np
 
 
 def load_model(path, device):
@@ -33,6 +34,29 @@ def load_model(path, device):
     checkpoint = None # free up memory
 
     return model, checkpoint_model_args, iter_num, best_val_loss
+
+
+def save_games(trajs, tokenizer, num_games):
+    # indices = np.random.choice(len(trajs), num_games, replace=False)
+    indices = np.arange(len(trajs))
+    print(indices)
+    for count, i in enumerate(indices):
+        traj = trajs[i][0]
+
+        moves = [tokenizer.id_to_token(id) for id in traj[1::2]]
+
+        print(moves[:5], moves[-5:], len(moves))
+
+        game = chess.pgn.Game()
+        board = chess.Board()
+
+        game.setup(board)
+        node = game
+        for move in moves:
+            node = node.add_variation(board.parse_san(move))
+            board.push_san(move)
+
+        print(game, file=open(f"funnel_games/game{count}.pgn", "w"), end="\n\n")
 
 
 def collect_funnel(model: GPT, 
@@ -96,6 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-round", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=1)
     parser.add_argument("--pgn-freq", type=int, default=100)
+    parser.add_argument("--num-save-games", type=int, default=0)
     args = parser.parse_args()
     print(args)
 
@@ -112,28 +137,17 @@ if __name__ == "__main__":
 
     # create a k sequence
     k_seqs = [5 for i in range(200)]
-    m_seqs = []
+    m_seqs = [1] * 10 + [2] * 10 + [10] * 10 + [30] * 10 + [50] * 10
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
-    for i in range(40):
-        m_seqs.extend([i + 1] * 10)
+    for i in range(200):
+        m_seqs.extend([100])
+    print(m_seqs)
 
     trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
-    print(len(trajs))
-    traj = trajs[0][0]
-    moves = [tokenizer.id_to_token(id) for id in traj[1::2]]
-    print(moves)
-
-    game = chess.pgn.Game()
-    board = chess.Board()
-    game.setup(board)
-    node = game
-    for move in moves:
-        node = node.add_variation(board.parse_san(move))
-        board.push_san(move)
-
-    print(game, file=open(f"funnel_games/game{0}.pgn", "w"), end="\n\n")
+    print(f"**** Number of trajectories collected: {len(trajs)} ****")
+    save_games(trajs, tokenizer, args.num_save_games)
     
 
     # train(model,

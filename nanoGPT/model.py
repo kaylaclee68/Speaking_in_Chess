@@ -802,6 +802,7 @@ class GPT(nn.Module):
                       batch_size: int,
                       max_round: int):
         all_beams = []
+        counter = 0
         beams = [(start_idx, start_board.copy(), 0) for _ in range(m_seqs[0])]
 
         for turn in tqdm(range(max_round)):
@@ -848,12 +849,13 @@ class GPT(nn.Module):
                 if new_board.is_game_over(): # stop this beam if game ends
                     all_beams.append((idx, new_board, logits_sum))
                     print(logits_sum)
+                    counter += 1
                 else:
                     new_beams.append((idx, new_board, logits_sum))
             
-            if len(new_beams) == 0:
+            if counter >= m or len(new_beams) == 0:
                 return all_beams
             
             beams = new_beams # account for incrementing m since new_beams is dynamic
 
-        return all_beams.extend(beams)
+        return all_beams
