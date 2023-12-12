@@ -824,8 +824,13 @@ class GPT(nn.Module):
 
                 idx_next, logits, _ = self.get_next_move(idx, board, tokenizer, temperature, k)
                 
+                logits = logits.squeeze()
+                if len(logits.size()) == 0:
+                    logits = logits.unsqueeze(0)
+                    idx_next = idx_next.unsqueeze(0)
+                
                 # sum logprob logits in this trajectory
-                logits = nn.functional.log_softmax(logits.squeeze(), dim=0) + score 
+                logits = nn.functional.log_softmax(logits, dim=0) + score 
 
                 all_logits = torch.cat((all_logits, logits))
                 all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
