@@ -8,6 +8,7 @@ import chess
 import torch
 import argparse
 import random
+import json
 
 
 # model initialization
@@ -68,11 +69,13 @@ def make_move(board, model, tokenizer, num_moves_so_far, turn_list, device):
     return move, turn_list
 
 
-def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
+def eval(model, stockfish: Stockfish, tokenizer, mode, rounds, device, max_round, out_path):
     game_log = []
     num_wins = 0
     num_lose = 0
     num_draws = 0
+
+    game_data = []
 
     for i in tqdm(range(rounds)):
         board = chess.Board()
@@ -94,6 +97,8 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
 
         num_moves_so_far = 0
 
+        list_eval = []
+
         while (not board.is_game_over()) and num_moves_so_far <= max_round:
             turn = num_moves_so_far % 2
             if turn == first:
@@ -101,7 +106,12 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
                 node = node.add_variation(board.parse_san(move))
             else:
                 stockfish.set_fen_position(board.fen())
-                from_uci_move = chess.Move.from_uci(stockfish.get_best_move())
+                top_moves = stockfish.get_top_moves(1)
+                from_uci_move = chess.Move.from_uci(stockfish.get_best_move_time(500))
+
+                list_eval.append(stockfish.get_evaluation())
+
+
 
                 id = tokenizer.token_to_id(board.lan(from_uci_move))
 
@@ -144,6 +154,18 @@ def eval(model, stockfish, tokenizer, mode, rounds, device, max_round):
 
         print(game, file=open(f"eval_games/game{i}.pgn", "w"), end="\n\n")
 
+        data = dict(
+            id=i,
+            length=num_moves_so_far,
+            evals=list_eval
+        )
+
+        game_data.append(data)
+
+    
+    with open(args.out_path, 'w') as out_file:
+        json.dump(game_data, out_file, intent=1)
+
     return game_log, num_wins, num_lose, num_draws
 
 
@@ -158,8 +180,11 @@ if __name__ == "__main__":
         "black",
         "random"
     ], default="white")
-    parser.add_argument("--tokenizer-file", type=str, default="/data/evan/CS285_Final_Project/model/tokenizer.model")
+    parser.add_argument("--tokenizer-file", type=str, default="../model/tokenizer.model")
     parser.add_argument("--max-round", type=int, default=200)
+    parser.add_argument("--stockfish-path", type=str, default='stockfish')
+    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--out-path", type=str)
     args = parser.parse_args()
     print(args)
 
@@ -168,7 +193,7 @@ if __name__ == "__main__":
     model = load_model(args.checkpoint_file, args.device)
 
     # load stockfish
-    stockfish = Stockfish(parameters={"Slow Mover":1, "Minimum Thinking Time":20})
+    stockfish = Stockfish(args.stockfish_path, parameters={"Slow Mover":1, "Minimum Thinking Time":5, "Threads": args.threads})
     stockfish.set_elo_rating(args.elo)
 
     print(f"Stockfish Stats:\n{stockfish.get_parameters()}")
@@ -183,7 +208,8 @@ if __name__ == "__main__":
                                      args.mode, 
                                      args.num_plays, 
                                      args.device, 
-                                     args.max_round)
+                                     args.max_round,
+                                     args.out_path)
     
     print(f"Wins: {win}")
     print(f"Loss: {loss}")
