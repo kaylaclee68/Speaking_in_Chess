@@ -800,7 +800,7 @@ class GPT(nn.Module):
     # m_seqs: a scheduler for m -> how many top beam we choose at state i
     def funnel_search(self, 
                       start_idx: torch.Tensor,
-                      k_seqs: list,
+                      k_seqs_prob: list,
                       m_seqs: list,
                       tokenizer: Tokenizer, 
                       start_board: chess.Board,
@@ -813,13 +813,14 @@ class GPT(nn.Module):
         beams = [(start_idx, start_board.copy(), 0) for _ in range(m_seqs[0])]
 
         for turn in tqdm(range(max_round)):
-            k = k_seqs[turn]
             m = m_seqs[turn]
             turn_id = turn % 2
 
             all_logits = torch.tensor([]).to(device)
             all_idx_next = torch.IntTensor([]).to(device)
+            idx_map = {}
             for idx, board, score in beams:
+                k = np.random.choice([1, 2], p=[1 - k_seqs_prob[turn], k_seqs_prob[turn]])
                 idx = torch.cat((idx, torch.IntTensor([turn_id]).to(device)))
 
                 idx_next, logits, _ = self.get_next_move(idx, board, tokenizer, temperature, k)
@@ -834,6 +835,11 @@ class GPT(nn.Module):
 
                 all_logits = torch.cat((all_logits, logits))
                 all_idx_next = torch.cat((all_idx_next, idx_next)) # k at per beam
+
+                idx_map[len(all_logits)] = idx
+
+                if k == 2:
+                    idx_map[len(all_logits) - 1] = idx
         
             _, indices = torch.topk(all_logits, min(m, len(all_logits))) # pick top m beams
 
@@ -841,7 +847,7 @@ class GPT(nn.Module):
             all_idx_next = all_idx_next[indices]
 
             new_beams = []
-            beams = [beams[i] for i in (indices // k)]
+            beams = [beams[idx_map[i.item()]] for i in indices]
             for i, info in enumerate(beams): # since we extend k nodes per beam
                 idx, board, score = info
                 logits_sum, idx_next = all_logits[i], all_idx_next[i]
