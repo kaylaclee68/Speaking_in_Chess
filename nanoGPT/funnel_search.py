@@ -136,9 +136,13 @@ def train(model: GPT,
                 else:
                     X = torch.cat((X, idx.unsqueeze(0)), dim=0)
 
-                outcome = board.outcome().result()
-                w = int(outcome == '1-0')
-                b = int(outcome == '0-1')
+                if board.is_game_over():
+                    outcome = board.outcome().result()
+                    w = int(outcome == '1-0')
+                    b = int(outcome == '0-1')
+                else:
+                    w = 0
+                    b = 0
                 Y = torch.cat((Y, torch.tensor([w, b]).to(device).unsqueeze(0)), dim=0)
 
             _, loss = model(idx=X, targets=Y.flatten(), offline=True)
