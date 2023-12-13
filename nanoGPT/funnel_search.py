@@ -42,17 +42,20 @@ def load_model(path, device):
     return model, checkpoint_model_args, iter_num, best_val_loss
 
 
-def save_games(trajs, tokenizer, num_games, iter):
+def save_games(trajs, tokenizer, num_games, iter, print_only):
     indices = np.random.choice(len(trajs), num_games, replace=False)
     
     print(indices)
-    for count, i in enumerate(indices):
+    for count, i in enumerate(sorted(indices)):
         traj = trajs[i][0]
 
         moves = [tokenizer.id_to_token(id) for id in traj[1::2]]
 
         print(moves[:5], moves[-5:], len(moves))
 
+        if print_only:
+            continue
+        
         game = chess.pgn.Game()
         board = chess.Board()
 
@@ -114,7 +117,6 @@ def train(model: GPT,
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
     optimizer.zero_grad(set_to_none=True)
 
-    raw_model = model
 
     for iter in tqdm(range(iterations)):
         # train
@@ -153,7 +155,8 @@ def train(model: GPT,
                     b = 0
                 Y = torch.cat((Y, torch.tensor([w, b]).to(device).unsqueeze(0)), dim=0)
 
-            _, loss = model(idx=X, targets=Y.flatten(), offline=True)
+            with ctx:
+                _, loss = model(idx=X, targets=Y.flatten(), offline=True)
             loss = loss / gradient_accumulation_steps
 
             loss.backward()
@@ -164,12 +167,12 @@ def train(model: GPT,
 
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-        if iter % save_freq == 0:
-            save_games(trajectories, tokenizer, min(100, len(trajectories)), iter)
 
-        if iter % eval_freq == 0:
+        save_games(trajectories, tokenizer, min(100, len(trajectories)), iter, iter % save_freq != 0)
+
+        if iter % eval_freq == 0 and iter > 0:
             checkpoint = {
-                'model': raw_model.state_dict(),
+                'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'model_args': checkpoint_args,
                 'iter': iter,
@@ -185,11 +188,11 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--tokenizer-file", type=str, default="../model/tokenizer.model")
     parser.add_argument("--num-iter", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, default=10)
-    parser.add_argument("--max-round", type=int, default=124)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--max-round", type=int, default=150)
     parser.add_argument("--temperature", type=float, default=1)
-    parser.add_argument("--eval-freq", type=int, default=100)
-    parser.add_argument("--save-freq", type=int, default=20)
+    parser.add_argument("--eval-freq", type=int, default=10)
+    parser.add_argument("--save-freq", type=int, default=2)
     parser.add_argument("--num-save-games", type=int, default=0)
     parser.add_argument("--output-dir", type=str, required=True)
     args = parser.parse_args()
@@ -207,12 +210,12 @@ if __name__ == "__main__":
     tokenizer.enable_truncation(checkpoint_args["block_size"] + 1)
 
     # create a k sequence
-    k_seqs = [0.07 for i in range(200)]
-    m_seqs = [1]
+    k_seqs = [0.06 for i in range(200)]
+    m_seqs = [10]
     # for i in range(20):
     #     m_seqs.extend([(i + 1) ** 2] * 10) # this k seqs double k every 10 moves
     for i in range(200):
-        m_seqs.extend([256])
+        m_seqs.extend([10000])
 
     # trajs = collect_funnel(model, tokenizer, k_seqs, m_seqs, args.temperature, args.device, args.max_round)
 
