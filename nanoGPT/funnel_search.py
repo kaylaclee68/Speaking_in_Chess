@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import argparse
 import random
+import os
 import numpy as np
 
 
@@ -41,9 +42,9 @@ def load_model(path, device):
     return model, checkpoint_model_args, iter_num, best_val_loss
 
 
-def save_games(trajs, tokenizer, num_games):
-    # indices = np.random.choice(len(trajs), num_games, replace=False)
-    indices = np.arange(len(trajs))
+def save_games(trajs, tokenizer, num_games, iter):
+    indices = np.random.choice(len(trajs), num_games, replace=False)
+    
     print(indices)
     for count, i in enumerate(indices):
         traj = trajs[i][0]
@@ -60,8 +61,10 @@ def save_games(trajs, tokenizer, num_games):
         for move in moves:
             node = node.add_variation(board.parse_san(move))
             board.push_san(move)
-
-        print(game, file=open(f"funnel_games/game{count}.pgn", "w"), end="\n\n")
+        
+        if not os.path.exists(f"funnel_games/{iter}"):
+            os.mkdir(f"funnel_games/{iter}")
+        print(game, file=open(f"funnel_games/{iter}/game{count}.pgn", "w"), end="\n\n")
 
 
 def collect_funnel(model: GPT, 
@@ -95,7 +98,10 @@ def train(model: GPT,
           device: str,
           batch_size: int,
           max_round: int,
-          eval_freq: int):
+          eval_freq: int,
+          save_freq: int,
+          out_dir: str,
+          checkpoint_args):
     learning_rate = 6e-4 # max learning rate
     max_iters = 600000 # total number of training iterations
     weight_decay = 0.0
@@ -107,8 +113,10 @@ def train(model: GPT,
     ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=torch.bfloat16)
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
     optimizer.zero_grad(set_to_none=True)
-    for i in tqdm(range(iterations)):
 
+    raw_model = model
+
+    for iter in tqdm(range(iterations)):
         # train
         with ctx:
             trajectories = collect_funnel(model,
@@ -156,12 +164,18 @@ def train(model: GPT,
 
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-        # # validation
-        # eval = i % eval_freq == 0 # record game every pgn-freq step
-        # if eval:
-        #     game = chess.pgn.Game()
-        #     game.setup(board)
-        #     node = game
+        if iter % save_freq == 0:
+            save_games(trajectories, tokenizer, min(100, len(trajectories)), iter)
+
+        if iter % eval_freq == 0:
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': checkpoint_args,
+                'iter': iter,
+            }
+            print(f"saving checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, f'ckpt{iter}.pt'))
     return
 
 
@@ -175,7 +189,9 @@ if __name__ == "__main__":
     parser.add_argument("--max-round", type=int, default=124)
     parser.add_argument("--temperature", type=float, default=1)
     parser.add_argument("--eval-freq", type=int, default=100)
+    parser.add_argument("--save-freq", type=int, default=20)
     parser.add_argument("--num-save-games", type=int, default=0)
+    parser.add_argument("--output-dir", type=str, required=True)
     args = parser.parse_args()
     print(args)
 
@@ -213,4 +229,7 @@ if __name__ == "__main__":
           args.device, 
           args.batch_size,
           args.max_round,
-          args.eval_freq)
+          args.eval_freq,
+          args.save_freq,
+          args.output_dir,
+          checkpoint_args)
