@@ -66,7 +66,7 @@ def make_move(board, model, tokenizer, num_moves_so_far, turn_list, device):
 
     turn_list = torch.cat((turn_list, idx_next.squeeze(0)))
 
-    return move, turn_list
+    return move, turn_list, logit, torch.exp(prob)
 
 
 def eval(model, stockfish: Stockfish, tokenizer, mode, rounds, device, max_round, out_path):
@@ -98,15 +98,18 @@ def eval(model, stockfish: Stockfish, tokenizer, mode, rounds, device, max_round
         num_moves_so_far = 0
 
         list_eval = []
+        list_logits = []
+        list_probs = []
 
         while (not board.is_game_over()) and num_moves_so_far <= max_round:
             turn = num_moves_so_far % 2
             if turn == first:
-                move, turn_list = make_move(board, model, tokenizer, num_moves_so_far, turn_list, device)
+                move, turn_list, logit, prob = make_move(board, model, tokenizer, num_moves_so_far, turn_list, device)
                 node = node.add_variation(board.parse_san(move))
+                list_logits.append(logit.item())
+                list_probs.append(prob.item())
             else:
                 stockfish.set_fen_position(board.fen())
-                top_moves = stockfish.get_top_moves(1)
                 from_uci_move = chess.Move.from_uci(stockfish.get_best_move_time(500))
 
                 list_eval.append(stockfish.get_evaluation())
@@ -157,14 +160,16 @@ def eval(model, stockfish: Stockfish, tokenizer, mode, rounds, device, max_round
         data = dict(
             id=i,
             length=num_moves_so_far,
-            evals=list_eval
+            evals=list_eval,
+            logits=list_logits,
+            probs=list_probs
         )
 
         game_data.append(data)
 
     
     with open(args.out_path, 'w') as out_file:
-        json.dump(game_data, out_file, intent=1)
+        json.dump(game_data, out_file, indent=1)
 
     return game_log, num_wins, num_lose, num_draws
 
