@@ -1,4 +1,5 @@
 # Speaking in Chess: Training Large Language Models to Play Chess
+Author: Evan Frick, Tianle Li, Kayla Lee
 
 Check out the paper! [Paper link](paper.pdf)
 
